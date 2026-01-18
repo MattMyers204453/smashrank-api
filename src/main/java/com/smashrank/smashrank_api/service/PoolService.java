@@ -15,91 +15,84 @@ import java.util.stream.Collectors;
 public class PoolService {
 
     private final StringRedisTemplate redisTemplate;
-    // Key for the Redis Sorted Set
-    private static final String POOL_KEY = "smashrank:active_pool";
+
+    // INDEX 1: Sorted by Name (Score always 0)
+    private static final String KEY_SEARCH = "smashrank:pool:search";
+
+    // INDEX 2: Sorted by Time (Score is Timestamp)
+    private static final String KEY_EXPIRY = "smashrank:pool:expiry";
 
     public PoolService(StringRedisTemplate redisTemplate) {
         this.redisTemplate = redisTemplate;
     }
 
-    /**
-     * Checks a player into the pool.
-     * Score = Current Timestamp (used for cleanup).
-     * Value = "username:character" (used for search).
-     */
     public void checkIn(String username, String character) {
         String value = formatValue(username, character);
-        double score = System.currentTimeMillis();
-        redisTemplate.opsForZSet().add(POOL_KEY, value, score);
+
+        // 1. Add to Search Index (Score 0 forces A-Z sorting)
+        redisTemplate.opsForZSet().add(KEY_SEARCH, value, 0);
+
+        // 2. Add to Expiry Index (Score = Time)
+        redisTemplate.opsForZSet().add(KEY_EXPIRY, value, System.currentTimeMillis());
     }
 
-    /**
-     * Removes a player from the pool manually.
-     */
     public void checkOut(String username, String character) {
         String value = formatValue(username, character);
-        redisTemplate.opsForZSet().remove(POOL_KEY, value);
+
+        // Remove from BOTH indices
+        redisTemplate.opsForZSet().remove(KEY_SEARCH, value);
+        redisTemplate.opsForZSet().remove(KEY_EXPIRY, value);
     }
 
-    /**
-     * Fast Prefix Search.
-     * Finds all players whose usernames start with the query string.
-     */
     public Set<PoolPlayer> search(String query) {
-        if (query == null || query.isBlank()) {
-            return Collections.emptySet();
-        }
+        if (query == null || query.isBlank()) return Collections.emptySet();
 
-        // Search range: From "Query" to "Query{" (Lexicographically covers all suffixes)
-        // Example: "Mew" -> Covers "Mew2King", "MewTwo", etc.
+        // Search the SEARCH index (which is guaranteed to be A-Z)
         var range = Range.from(Range.Bound.inclusive(query))
                 .to(Range.Bound.exclusive(query + "{"));
 
         Set<String> results = redisTemplate.opsForZSet().rangeByLex(
-                POOL_KEY,
+                KEY_SEARCH,
                 range,
-                RedisZSetCommands.Limit.limit().count(20) // Limit results to 20 for performance
+                RedisZSetCommands.Limit.limit().count(20)
         );
 
-        if (results == null) {
-            return Collections.emptySet();
-        }
+        if (results == null) return Collections.emptySet();
 
-        // Convert "username:character" strings back into PoolPlayer objects
         return results.stream()
                 .map(this::parseValue)
                 .collect(Collectors.toSet());
     }
 
-    /**
-     * The Janitor Task.
-     * Runs every 60 seconds.
-     * Removes players who haven't updated their timestamp in 15 minutes.
-     */
-    @Scheduled(fixedRate = 60000)
-    public void cleanupInactivePlayers() {
-        // Cutoff = Current Time - 15 Minutes (in milliseconds)
-        double cutoff = System.currentTimeMillis() - (15 * 60 * 1000);
+//    @Scheduled(fixedRate = 60000) // Run every minute
+//    public void cleanupInactivePlayers() {
+//        // 15 minute cutoff
+//        double cutoff = System.currentTimeMillis() - (15 * 60 * 1000);
+//
+//        // 1. Find the "Old" players using the EXPIRY index
+//        Set<String> expiredPlayers = redisTemplate.opsForZSet()
+//                .rangeByScore(KEY_EXPIRY, 0, cutoff);
+//
+//        if (expiredPlayers != null && !expiredPlayers.isEmpty()) {
+//            // 2. Remove them from BOTH indices
+//            // (toArray is needed because remove takes a varargs array)
+//            String[] players = expiredPlayers.toArray(new String[0]);
+//
+//            redisTemplate.opsForZSet().remove(KEY_SEARCH, (Object[]) players);
+//            redisTemplate.opsForZSet().remove(KEY_EXPIRY, (Object[]) players);
+//
+//            System.out.println("Janitor: Removed " + players.length + " players.");
+//        }
+//    }
 
-        // Remove anyone with a score LESS than the cutoff
-        Long removedCount = redisTemplate.opsForZSet().removeRangeByScore(POOL_KEY, 0, cutoff);
-
-        if (removedCount != null && removedCount > 0) {
-            System.out.println("Janitor: Removed " + removedCount + " inactive players from the pool.");
-        }
-    }
-
-    // Helper: Combines username and character for storage
     private String formatValue(String username, String character) {
         return username + ":" + character;
     }
 
-    // Helper: Splits storage string back into object
     private PoolPlayer parseValue(String value) {
         String[] parts = value.split(":", 2);
-        if (parts.length < 2) {
-            return new PoolPlayer(parts[0], "Unknown");
-        }
-        return new PoolPlayer(parts[0], parts[1]);
+        return (parts.length < 2)
+                ? new PoolPlayer(parts[0], "Unknown")
+                : new PoolPlayer(parts[0], parts[1]);
     }
 }
