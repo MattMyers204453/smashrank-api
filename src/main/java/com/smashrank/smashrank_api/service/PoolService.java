@@ -26,8 +26,8 @@ public class PoolService {
         this.redisTemplate = redisTemplate;
     }
 
-    public void checkIn(String username, String character) {
-        String value = formatValue(username, character);
+    public void checkIn(String username, String character, int elo) {
+        String value = formatValue(username, character, elo);
 
         // 1. Add to Search Index (Score 0 forces A-Z sorting)
         redisTemplate.opsForZSet().add(KEY_SEARCH, value, 0);
@@ -36,20 +36,25 @@ public class PoolService {
         redisTemplate.opsForZSet().add(KEY_EXPIRY, value, System.currentTimeMillis());
     }
 
-    public void checkOut(String username, String character) {
-        String value = formatValue(username, character);
+    public void checkOut(String username, String character, int elo) {
+        // formatValue will now generate "mew2king:Mew2King:..." matching the new format
+        String value = formatValue(username, character, elo);
 
-        // Remove from BOTH indices
         redisTemplate.opsForZSet().remove(KEY_SEARCH, value);
         redisTemplate.opsForZSet().remove(KEY_EXPIRY, value);
     }
 
     public Set<PoolPlayer> search(String query) {
-        if (query == null || query.isBlank()) return Collections.emptySet();
+        if (query == null || query.isBlank()) {
+            return Collections.emptySet();
+        }
 
-        // Search the SEARCH index (which is guaranteed to be A-Z)
-        var range = Range.from(Range.Bound.inclusive(query))
-                .to(Range.Bound.exclusive(query + "{"));
+        // FORCE LOWERCASE HERE
+        String lowerQuery = query.toLowerCase();
+
+        // Search range using the lowercase query
+        var range = Range.from(Range.Bound.inclusive(lowerQuery))
+                .to(Range.Bound.exclusive(lowerQuery + "{"));
 
         Set<String> results = redisTemplate.opsForZSet().rangeByLex(
                 KEY_SEARCH,
@@ -57,7 +62,9 @@ public class PoolService {
                 RedisZSetCommands.Limit.limit().count(20)
         );
 
-        if (results == null) return Collections.emptySet();
+        if (results == null) {
+            return Collections.emptySet();
+        }
 
         return results.stream()
                 .map(this::parseValue)
@@ -85,14 +92,22 @@ public class PoolService {
 //        }
 //    }
 
-    private String formatValue(String username, String character) {
-        return username + ":" + character;
+    // Helper: Prepends lowercase username for sorting
+    private String formatValue(String username, String character, int elo) {
+        // Format: "lowercase:Original:Character:ELO"
+        return username.toLowerCase() + ":" + username + ":" + character + ":" + elo;
     }
 
+    // Helper: Ignores the lowercase prefix, reads the rest
     private PoolPlayer parseValue(String value) {
-        String[] parts = value.split(":", 2);
-        return (parts.length < 2)
-                ? new PoolPlayer(parts[0], "Unknown")
-                : new PoolPlayer(parts[0], parts[1]);
+        String[] parts = value.split(":");
+
+        // We expect 4 parts: [0]lower, [1]Original, [2]Char, [3]Elo
+        if (parts.length < 4) {
+            return new PoolPlayer("Unknown", "Unknown", 1000);
+        }
+
+        // Return parts[1] (Original Name) instead of parts[0]
+        return new PoolPlayer(parts[1], parts[2], Integer.parseInt(parts[3]));
     }
 }

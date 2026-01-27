@@ -1,4 +1,4 @@
 package com.smashrank.smashrank_api.model;
 
-public record PoolPlayer(String username, String character) {
+public record PoolPlayer(String username, String character, int elo) {
 }

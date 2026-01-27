@@ -8,6 +8,7 @@ import java.util.Set;
 
 @RestController
 @RequestMapping("/api/pool")
+@CrossOrigin(origins = "*")
 public class PoolController {
 
     private final PoolService poolService;
@@ -17,13 +18,13 @@ public class PoolController {
     }
 
     @PostMapping("/check-in")
-    public void checkIn(@RequestParam String username, @RequestParam String character) {
-        poolService.checkIn(username, character);
+    public void checkIn(@RequestParam String username, @RequestParam String character, @RequestParam int elo) {
+        poolService.checkIn(username, character, elo);
     }
 
     @PostMapping("/check-out")
-    public void checkOut(@RequestParam String username, @RequestParam String character) {
-        poolService.checkOut(username, character);
+    public void checkOut(@RequestParam String username, @RequestParam String character, @RequestParam int elo) {
+        poolService.checkOut(username, character, elo);
     }
 
     @GetMapping("/search")
