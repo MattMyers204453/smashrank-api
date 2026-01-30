@@ -1,11 +1,8 @@
 package com.smashrank.smashrank_api.service;
 
 import com.smashrank.smashrank_api.model.PoolPlayer;
-import org.jspecify.annotations.NonNull;
-import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.Range;
-import org.springframework.data.redis.connection.RedisConnection;
-import org.springframework.data.redis.connection.RedisZSetCommands;
+import org.springframework.data.redis.connection.Limit;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -63,7 +60,7 @@ public class PoolService {
         Set<String> results = redisTemplate.opsForZSet().rangeByLex(
                 KEY_SEARCH,
                 range,
-                RedisZSetCommands.Limit.limit().count(20)
+                Limit.limit().count(20)
         );
 
         if (results == null) {
@@ -145,5 +142,23 @@ public class PoolService {
         });
 
         System.out.println("ADMIN ACTION: Bulk Seed: Added " + players.size() + " players.");
+    }
+
+    public Set<PoolPlayer> findAll() {
+        Range<String> range = Range.unbounded();
+
+        Set<String> results = redisTemplate.opsForZSet().rangeByLex(
+                KEY_SEARCH,
+                range,
+                Limit.limit().count(100)
+        );
+
+        if (results == null) {
+            return Collections.emptySet();
+        }
+
+        return results.stream()
+                .map(this::parseValue)
+                .collect(Collectors.toSet());
     }
 }

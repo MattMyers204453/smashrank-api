@@ -38,4 +38,9 @@ public class PoolController {
 
     @PostMapping("/admin/seed")
     public void seedPool(@RequestBody List<PoolPlayer> players) { poolService.bulkCheckIn(players); }
+
+    @GetMapping("/all")
+    public Set<PoolPlayer> getAllPlayers() {
+        return poolService.findAll();
+    }
 }
