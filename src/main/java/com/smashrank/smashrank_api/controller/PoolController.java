@@ -31,4 +31,7 @@ public class PoolController {
     public Set<PoolPlayer> search(@RequestParam String query) {
         return poolService.search(query);
     }
+
+    @DeleteMapping("/admin/flush")
+    public void flushPool() { poolService.flushPool(); }
 }

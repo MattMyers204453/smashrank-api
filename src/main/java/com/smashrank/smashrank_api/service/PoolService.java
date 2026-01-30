@@ -110,4 +110,11 @@ public class PoolService {
         // Return parts[1] (Original Name) instead of parts[0]
         return new PoolPlayer(parts[1], parts[2], Integer.parseInt(parts[3]));
     }
+
+    public void flushPool() {
+        redisTemplate.delete("smashrank:pool:search");
+        redisTemplate.delete("smashrank:pool:expiry");
+
+        System.out.println("⚠️ ADMIN ACTION: Pool flushed manually.");
+    }
 }
