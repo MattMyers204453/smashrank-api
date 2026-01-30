@@ -4,6 +4,7 @@ import com.smashrank.smashrank_api.model.PoolPlayer;
 import com.smashrank.smashrank_api.service.PoolService;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Set;
 
 @RestController
@@ -34,4 +35,7 @@ public class PoolController {
 
     @DeleteMapping("/admin/flush")
     public void flushPool() { poolService.flushPool(); }
+
+    @PostMapping("/admin/seed")
+    public void seedPool(@RequestBody List<PoolPlayer> players) { poolService.bulkCheckIn(players); }
 }

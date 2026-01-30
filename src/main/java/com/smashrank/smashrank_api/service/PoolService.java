@@ -1,13 +1,17 @@
 package com.smashrank.smashrank_api.service;
 
 import com.smashrank.smashrank_api.model.PoolPlayer;
+import org.jspecify.annotations.NonNull;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.domain.Range;
+import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisZSetCommands;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -115,6 +119,31 @@ public class PoolService {
         redisTemplate.delete("smashrank:pool:search");
         redisTemplate.delete("smashrank:pool:expiry");
 
-        System.out.println("⚠️ ADMIN ACTION: Pool flushed manually.");
+        System.out.println("ADMIN ACTION: Pool flushed manually.");
+    }
+
+    public void bulkCheckIn(List<PoolPlayer> players) {
+        // Use pipelining to send all commands in one network round-trip
+        redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            // Prepare keys as bytes once to save processing time
+            byte[] searchKey = KEY_SEARCH.getBytes();
+            byte[] expiryKey = KEY_EXPIRY.getBytes();
+            long now = System.currentTimeMillis();
+
+            for (PoolPlayer player : players) {
+                // REUSE your existing helper method for consistency
+                String value = formatValue(player.username(), player.character(), player.elo());
+                byte[] valueBytes = value.getBytes();
+
+                // 1. Add to Search Index (Score 0)
+                connection.zSetCommands().zAdd(searchKey, 0, valueBytes);
+
+                // 2. Add to Expiry Index (Score = Time)
+                connection.zSetCommands().zAdd(expiryKey, now, valueBytes);
+            }
+            return null; // Must return null when pipelining
+        });
+
+        System.out.println("ADMIN ACTION: Bulk Seed: Added " + players.size() + " players.");
     }
 }
