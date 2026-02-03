@@ -29,7 +29,7 @@ public class DataSeeder implements CommandLineRunner {
         // Using the constructor: public Player(String username, String lastTag)
         Player p1 = new Player("mew2king", "CT | M2K");
         p1.updateElo(2000); // Manually setting ELO using your helper method
-        // Note: wins/losses will default to 0 unless you add setters for them
+        // Note: wins/losses will default to 0 unless you add setters
 
         Player p2 = new Player("mang0", "C9 | Mang0");
         p2.updateElo(2100);
