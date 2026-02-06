@@ -97,6 +97,36 @@ public class MatchController {
         );
     }
 
+    /**
+     * STEP 4: Report Result
+     * Ends the match and notifies both players.
+     */
+    @PostMapping("/report")
+    public void reportResult(@RequestBody ReportRequest request) {
+        Match match = matchRepository.findById(request.matchId())
+                .orElseThrow(() -> new IllegalArgumentException("Match not found"));
+
+        // Update the winner
+        match.setWinnerUsername(request.winnerUsername());
+        matchRepository.save(match);
+
+        // Notify BOTH players that the match is over
+        MatchUpdateEvent endEvent = new MatchUpdateEvent(
+                match.getId(),
+                "ENDED",
+                match.getPlayer1Username(),
+                match.getPlayer2Username()
+        );
+
+        // In a real app, you would verify that the 'Principal' matches one of the players
+        // before allowing them to report, to prevent griefing.
+        messagingTemplate.convertAndSendToUser(match.getPlayer1Username(), "/queue/match-updates", endEvent);
+        messagingTemplate.convertAndSendToUser(match.getPlayer2Username(), "/queue/match-updates", endEvent);
+    }
+
+    // Add this Record at the bottom with the others
+    public record ReportRequest(String matchId, String winnerUsername) {}
+
     // --- DTOs ---
     public record InviteRequest(String challengerUsername, String targetUsername) {}
     public record InvitePayload(String inviteId, String from, String status) {}
