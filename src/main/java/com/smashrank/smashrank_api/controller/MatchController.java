@@ -110,6 +110,10 @@ public class MatchController {
         match.setWinnerUsername(request.winnerUsername());
         matchRepository.save(match);
 
+        // Release locks — match is over, both players can challenge again
+        playerLocks.remove(match.getPlayer1Username());
+        playerLocks.remove(match.getPlayer2Username());
+
         // Notify BOTH players that the match is over
         MatchUpdateEvent endEvent = new MatchUpdateEvent(
                 match.getId(),
@@ -118,8 +122,6 @@ public class MatchController {
                 match.getPlayer2Username()
         );
 
-        // In a real app, you would verify that the 'Principal' matches one of the players
-        // before allowing them to report, to prevent griefing.
         messagingTemplate.convertAndSendToUser(match.getPlayer1Username(), "/queue/match-updates", endEvent);
         messagingTemplate.convertAndSendToUser(match.getPlayer2Username(), "/queue/match-updates", endEvent);
     }
