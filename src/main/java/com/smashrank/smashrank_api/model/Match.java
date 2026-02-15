@@ -28,6 +28,12 @@ public class Match {
     @Setter
     private String winnerUsername;
 
+    // ACTIVE → COMPLETED or DISPUTED
+    @Getter
+    @Setter
+    @Column(nullable = false)
+    private String status = "ACTIVE";
+
     @CreationTimestamp
     private LocalDateTime playedAt;
 
