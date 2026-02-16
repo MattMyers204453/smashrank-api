@@ -107,6 +107,31 @@ public class MatchController {
     }
 
     // =========================================================================
+    // STEP 3b: Cancel Invite (challenger withdraws their own invite)
+    // =========================================================================
+    @PostMapping("/cancel")
+    public ResponseEntity<String> cancelInvite(@RequestBody CancelRequest request) {
+        String challenger = request.challengerUsername();
+        String opponent = request.opponentUsername();
+
+        // Validate: the challenger must actually have a lock with this inviteId
+        String lockedId = playerLocks.get(challenger);
+        if (lockedId == null || !lockedId.equals(request.inviteId())) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("No matching invite found.");
+        }
+
+        // Release locks
+        playerLocks.remove(challenger);
+        playerLocks.remove(opponent);
+
+        // Notify opponent so their invite dialog is dismissed
+        InvitePayload cancelPayload = new InvitePayload(request.inviteId(), challenger, "CANCELLED");
+        messagingTemplate.convertAndSendToUser(opponent, "/queue/invites", cancelPayload);
+
+        return ResponseEntity.ok("Invite cancelled.");
+    }
+
+    // =========================================================================
     // STEP 4: Report Result (first player submits — awaits confirmation)
     // =========================================================================
     @PostMapping("/report")
@@ -193,6 +218,7 @@ public class MatchController {
     public record InvitePayload(String inviteId, String from, String status) {}
     public record AcceptRequest(String inviteId, String challengerUsername, String opponentUsername) {}
     public record DeclineRequest(String inviteId, String challengerUsername, String opponentUsername) {}
+    public record CancelRequest(String inviteId, String challengerUsername, String opponentUsername) {}
 
     // Report: first player submits their claim
     public record ReportRequest(String matchId, String reporterUsername, String claimedWinner) {}
