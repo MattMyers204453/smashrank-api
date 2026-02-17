@@ -8,6 +8,7 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -26,6 +27,10 @@ public class MatchController {
     // Pending first-reports awaiting confirmation from the other player.
     // Key: matchId, Value: PendingReport (who reported and what they claimed)
     private final Map<String, PendingReport> pendingReports = new ConcurrentHashMap<>();
+
+    // Pending rematch offers awaiting both players' responses.
+    // Key: matchId (of the COMPLETED match), Value: PendingRematch
+    private final Map<String, PendingRematch> pendingRematches = new ConcurrentHashMap<>();
 
     public MatchController(SimpMessagingTemplate messagingTemplate, MatchRepository matchRepository) {
         this.messagingTemplate = messagingTemplate;
@@ -77,113 +82,112 @@ public class MatchController {
         Match match = new Match(request.challengerUsername(), request.opponentUsername());
         matchRepository.save(match);
 
-        // Notify BOTH players
-        MatchUpdateEvent startEvent = new MatchUpdateEvent(
+        // Notify both players
+        MatchUpdateEvent event = new MatchUpdateEvent(
                 match.getId(), "STARTED",
                 match.getPlayer1Username(), match.getPlayer2Username(),
-                null, null);
+                null, null, null);
 
-        messagingTemplate.convertAndSendToUser(request.challengerUsername(), "/queue/match-updates", startEvent);
-        messagingTemplate.convertAndSendToUser(request.opponentUsername(), "/queue/match-updates", startEvent);
+        messagingTemplate.convertAndSendToUser(request.challengerUsername(), "/queue/match-updates", event);
+        messagingTemplate.convertAndSendToUser(request.opponentUsername(), "/queue/match-updates", event);
     }
 
     // =========================================================================
-    // STEP 3: Decline Invite
+    // STEP 2b: Decline Invite
     // =========================================================================
     @PostMapping("/decline")
     public void declineInvite(@RequestBody DeclineRequest request) {
-        // Release Locks
+        // Release locks
         playerLocks.remove(request.challengerUsername());
         playerLocks.remove(request.opponentUsername());
 
-        // Notify Challenger
-        messagingTemplate.convertAndSendToUser(
-                request.challengerUsername(),
-                "/queue/match-updates",
-                new MatchUpdateEvent(null, "DECLINED",
-                        request.challengerUsername(), request.opponentUsername(),
-                        null, null)
-        );
+        // Notify challenger
+        MatchUpdateEvent event = new MatchUpdateEvent(
+                null, "DECLINED",
+                request.challengerUsername(), request.opponentUsername(),
+                null, null, null);
+
+        messagingTemplate.convertAndSendToUser(request.challengerUsername(), "/queue/match-updates", event);
     }
 
     // =========================================================================
-    // STEP 3b: Cancel Invite (challenger withdraws their own invite)
+    // STEP 2c: Cancel Invite (challenger cancels before opponent responds)
     // =========================================================================
     @PostMapping("/cancel")
     public ResponseEntity<String> cancelInvite(@RequestBody CancelRequest request) {
+        String inviteId = request.inviteId();
         String challenger = request.challengerUsername();
         String opponent = request.opponentUsername();
 
-        // Validate: the challenger must actually have a lock with this inviteId
+        // Validate that the lock exists and matches
         String lockedId = playerLocks.get(challenger);
-        if (lockedId == null || !lockedId.equals(request.inviteId())) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("No matching invite found.");
+        if (lockedId == null || !lockedId.equals(inviteId)) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("No matching invite to cancel.");
         }
 
         // Release locks
         playerLocks.remove(challenger);
         playerLocks.remove(opponent);
 
-        // Notify opponent so their invite dialog is dismissed
-        InvitePayload cancelPayload = new InvitePayload(request.inviteId(), challenger, "CANCELLED");
+        // Notify opponent that invite was cancelled
+        InvitePayload cancelPayload = new InvitePayload(inviteId, challenger, "CANCELLED");
         messagingTemplate.convertAndSendToUser(opponent, "/queue/invites", cancelPayload);
 
         return ResponseEntity.ok("Invite cancelled.");
     }
 
     // =========================================================================
-    // STEP 4: Report Result (first player submits — awaits confirmation)
+    // STEP 3: Report Result (First player submits their claim)
     // =========================================================================
     @PostMapping("/report")
     public ResponseEntity<String> reportResult(@RequestBody ReportRequest request) {
-        // Prevent double-report while already awaiting confirmation
-        if (pendingReports.containsKey(request.matchId())) {
+        String matchId = request.matchId();
+
+        // Reject if someone already reported for this match
+        if (pendingReports.containsKey(matchId)) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body("A result has already been submitted. Waiting for confirmation.");
+                    .body("A result has already been reported for this match. Waiting for confirmation.");
         }
 
-        Match match = matchRepository.findById(request.matchId())
-                .orElseThrow(() -> new IllegalArgumentException("Match not found"));
+        // Store the pending report
+        pendingReports.put(matchId, new PendingReport(request.reporterUsername(), request.claimedWinner()));
 
-        // Store the pending report — don't finalize yet
-        pendingReports.put(request.matchId(),
-                new PendingReport(request.reporterUsername(), request.claimedWinner()));
-
-        // Notify BOTH players: reporter knows they're waiting, opponent knows they need to confirm
+        // Notify BOTH players that confirmation is needed
+        Match match = matchRepository.findById(matchId).orElseThrow();
         MatchUpdateEvent event = new MatchUpdateEvent(
-                match.getId(), "AWAITING_CONFIRMATION",
+                matchId, "AWAITING_CONFIRMATION",
                 match.getPlayer1Username(), match.getPlayer2Username(),
-                request.reporterUsername(), request.claimedWinner());
+                request.reporterUsername(), request.claimedWinner(), null);
 
         messagingTemplate.convertAndSendToUser(match.getPlayer1Username(), "/queue/match-updates", event);
         messagingTemplate.convertAndSendToUser(match.getPlayer2Username(), "/queue/match-updates", event);
 
-        return ResponseEntity.ok("Result submitted. Awaiting opponent confirmation.");
+        return ResponseEntity.ok("Report received. Waiting for opponent to confirm.");
     }
 
     // =========================================================================
-    // STEP 5: Confirm Result (second player responds — match finalized)
+    // STEP 4: Confirm Result (Second player responds)
+    //         Now transitions to REMATCH_OFFERED instead of ENDED/DISPUTED
     // =========================================================================
     @PostMapping("/confirm")
     public ResponseEntity<String> confirmResult(@RequestBody ConfirmRequest request) {
-        PendingReport pending = pendingReports.get(request.matchId());
+        String matchId = request.matchId();
+
+        PendingReport pending = pendingReports.get(matchId);
         if (pending == null) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body("No pending report found for this match.");
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("No pending report for this match.");
         }
 
-        // Prevent the original reporter from confirming their own report
+        // Prevent the reporter from confirming their own report
         if (pending.reporterUsername().equals(request.confirmerUsername())) {
-            return ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body("You cannot confirm your own report.");
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("You already reported. Waiting for opponent.");
         }
 
-        Match match = matchRepository.findById(request.matchId())
-                .orElseThrow(() -> new IllegalArgumentException("Match not found"));
-
-        // Compare: do both players agree on the winner?
+        // Compare claims
         boolean agreed = pending.claimedWinner().equals(request.claimedWinner());
 
+        // Update the match in Postgres
+        Match match = matchRepository.findById(matchId).orElseThrow();
         if (agreed) {
             match.setWinnerUsername(pending.claimedWinner());
             match.setStatus("COMPLETED");
@@ -193,22 +197,107 @@ public class MatchController {
         }
         matchRepository.save(match);
 
-        // Clean up
-        pendingReports.remove(request.matchId());
-        playerLocks.remove(match.getPlayer1Username());
-        playerLocks.remove(match.getPlayer2Username());
+        // Clean up pending report
+        pendingReports.remove(matchId);
 
-        // Notify both players
-        String status = agreed ? "ENDED" : "DISPUTED";
-        MatchUpdateEvent endEvent = new MatchUpdateEvent(
-                match.getId(), status,
+        // --- REMATCH FLOW ---
+        // Instead of releasing locks and sending ENDED/DISPUTED,
+        // create a pending rematch entry and send REMATCH_OFFERED.
+        // Locks stay held to prevent other invites during rematch window.
+        String result = agreed ? "COMPLETED" : "DISPUTED";
+        String winner = agreed ? pending.claimedWinner() : null;
+
+        pendingRematches.put(matchId, new PendingRematch(
+                matchId,
+                match.getPlayer1Username(),
+                match.getPlayer2Username(),
+                ConcurrentHashMap.newKeySet()  // thread-safe empty set
+        ));
+
+        MatchUpdateEvent rematchEvent = new MatchUpdateEvent(
+                matchId, "REMATCH_OFFERED",
                 match.getPlayer1Username(), match.getPlayer2Username(),
-                null, agreed ? pending.claimedWinner() : null);
+                null, winner, result);
 
-        messagingTemplate.convertAndSendToUser(match.getPlayer1Username(), "/queue/match-updates", endEvent);
-        messagingTemplate.convertAndSendToUser(match.getPlayer2Username(), "/queue/match-updates", endEvent);
+        messagingTemplate.convertAndSendToUser(match.getPlayer1Username(), "/queue/match-updates", rematchEvent);
+        messagingTemplate.convertAndSendToUser(match.getPlayer2Username(), "/queue/match-updates", rematchEvent);
 
-        return ResponseEntity.ok(status);
+        return ResponseEntity.ok(result);
+    }
+
+    // =========================================================================
+    // STEP 5: Rematch (Both players respond accept/decline)
+    // =========================================================================
+    @PostMapping("/rematch")
+    public ResponseEntity<String> handleRematch(@RequestBody RematchRequest request) {
+        String matchId = request.matchId();
+        String username = request.username();
+        boolean accept = request.accept();
+
+        PendingRematch pending = pendingRematches.get(matchId);
+        if (pending == null) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("No pending rematch for this match.");
+        }
+
+        // Validate the player is part of this match
+        if (!pending.player1Username().equals(username) && !pending.player2Username().equals(username)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("You are not part of this match.");
+        }
+
+        // Reject duplicate responses
+        if (pending.acceptedPlayers().contains(username)) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("You already responded to this rematch.");
+        }
+
+        // --- DECLINE ---
+        if (!accept) {
+            pendingRematches.remove(matchId);
+            playerLocks.remove(pending.player1Username());
+            playerLocks.remove(pending.player2Username());
+
+            MatchUpdateEvent declinedEvent = new MatchUpdateEvent(
+                    matchId, "REMATCH_DECLINED",
+                    pending.player1Username(), pending.player2Username(),
+                    null, null, null);
+
+            messagingTemplate.convertAndSendToUser(pending.player1Username(), "/queue/match-updates", declinedEvent);
+            messagingTemplate.convertAndSendToUser(pending.player2Username(), "/queue/match-updates", declinedEvent);
+
+            return ResponseEntity.ok("Rematch declined.");
+        }
+
+        // --- ACCEPT ---
+        pending.acceptedPlayers().add(username);
+
+        if (pending.acceptedPlayers().size() == 1) {
+            // Only one player accepted so far — notify them they're waiting
+            MatchUpdateEvent waitingEvent = new MatchUpdateEvent(
+                    matchId, "REMATCH_WAITING",
+                    pending.player1Username(), pending.player2Username(),
+                    null, null, null);
+
+            messagingTemplate.convertAndSendToUser(username, "/queue/match-updates", waitingEvent);
+
+            return ResponseEntity.ok("Waiting for opponent.");
+        }
+
+        // Both players accepted — start a new match!
+        pendingRematches.remove(matchId);
+
+        // Create new match (same two players, fresh record)
+        Match newMatch = new Match(pending.player1Username(), pending.player2Username());
+        matchRepository.save(newMatch);
+
+        // Send STARTED to both — locks remain held (they're in a new match now)
+        MatchUpdateEvent startedEvent = new MatchUpdateEvent(
+                newMatch.getId(), "STARTED",
+                newMatch.getPlayer1Username(), newMatch.getPlayer2Username(),
+                null, null, null);
+
+        messagingTemplate.convertAndSendToUser(pending.player1Username(), "/queue/match-updates", startedEvent);
+        messagingTemplate.convertAndSendToUser(pending.player2Username(), "/queue/match-updates", startedEvent);
+
+        return ResponseEntity.ok("Rematch started! New match ID: " + newMatch.getId());
     }
 
     // =========================================================================
@@ -226,12 +315,22 @@ public class MatchController {
     // Confirm: second player submits their independent view
     public record ConfirmRequest(String matchId, String confirmerUsername, String claimedWinner) {}
 
+    // Rematch: player accepts or declines rematch offer
+    public record RematchRequest(String matchId, String username, boolean accept) {}
+
     // Internal: held in pendingReports map
     public record PendingReport(String reporterUsername, String claimedWinner) {}
 
+    // Internal: held in pendingRematches map
+    public record PendingRematch(String matchId, String player1Username, String player2Username,
+                                 Set<String> acceptedPlayers) {}
+
     // WebSocket event — sent on /user/queue/match-updates
-    // reporterUsername & claimedWinner are only populated for AWAITING_CONFIRMATION events
+    // reporterUsername & claimedWinner populated for AWAITING_CONFIRMATION
+    // result populated for REMATCH_OFFERED ("COMPLETED" or "DISPUTED")
+    // claimedWinner populated for REMATCH_OFFERED when result is "COMPLETED" (the winner)
     public record MatchUpdateEvent(String matchId, String status,
                                    String player1, String player2,
-                                   String reporterUsername, String claimedWinner) {}
+                                   String reporterUsername, String claimedWinner,
+                                   String result) {}
 }
