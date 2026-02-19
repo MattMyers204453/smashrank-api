@@ -1,49 +1,57 @@
 package com.smashrank.smashrank_api.config;
 
 import com.smashrank.smashrank_api.model.Player;
+import com.smashrank.smashrank_api.model.User;
 import com.smashrank.smashrank_api.repository.PlayerRepository;
+import com.smashrank.smashrank_api.repository.UserRepository;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
-
-import java.util.Arrays;
-import java.util.List;
 
 @Component
 public class DataSeeder implements CommandLineRunner {
 
+    private final UserRepository userRepository;
     private final PlayerRepository playerRepository;
+    private final PasswordEncoder passwordEncoder;
 
-    public DataSeeder(PlayerRepository playerRepository) {
+    public DataSeeder(UserRepository userRepository,
+                      PlayerRepository playerRepository,
+                      PasswordEncoder passwordEncoder) {
+        this.userRepository = userRepository;
         this.playerRepository = playerRepository;
+        this.passwordEncoder = passwordEncoder;
     }
 
     @Override
     public void run(String... args) throws Exception {
         // Check if data already exists to prevent duplicates on restart
-        if (playerRepository.count() == 0) {
-            seedPlayers();
+        if (userRepository.count() == 0) {
+            seedUsersAndPlayers();
         }
     }
 
-    private void seedPlayers() {
-        // Using the constructor: public Player(String username, String lastTag)
-        Player p1 = new Player("mew2king", "CT | M2K");
-        p1.updateElo(2000); // Manually setting ELO using your helper method
-        // Note: wins/losses will default to 0 unless you add setters
+    private void seedUsersAndPlayers() {
+        // All seed accounts share the password "password123" for dev/testing.
+        String hashedPassword = passwordEncoder.encode("password123");
 
-        Player p2 = new Player("mang0", "C9 | Mang0");
-        p2.updateElo(2100);
+        createUserAndPlayer("mew2king", hashedPassword, 2000);
+        createUserAndPlayer("mang0", hashedPassword, 2100);
+        createUserAndPlayer("zain", hashedPassword, 2200);
+        createUserAndPlayer("ibdw", hashedPassword, 1200);
 
-        Player p3 = new Player("zain", "GG | Zain");
-        p3.updateElo(2200);
+        System.out.println("Database seeded with 4 users and players.");
+    }
 
-        Player p4 = new Player("ibdw", "Cody Schwab");
-        // ELO defaults to 1200 as per your Player.java definition
+    private void createUserAndPlayer(String username, String hashedPassword, int elo) {
+        // 1. Create User (auth identity)
+        User user = new User(username, hashedPassword);
+        userRepository.save(user);
 
-        List<Player> players = Arrays.asList(p1, p2, p3, p4);
-
-        playerRepository.saveAll(players);
-
-        System.out.println("Database seeded with " + players.size() + " players.");
+        // 2. Create Player (gaming profile)
+        // Note: Player still uses username for now; Phase 2 will add userId FK.
+        Player player = new Player(username, username);
+        player.updateElo(elo);
+        playerRepository.save(player);
     }
 }
