@@ -1,5 +1,6 @@
 package com.smashrank.smashrank_api.config;
 
+import com.smashrank.smashrank_api.security.JwtUtil;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServletServerHttpRequest;
@@ -17,12 +18,17 @@ import java.util.Map;
 @EnableWebSocketMessageBroker
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
+    private final JwtUtil jwtUtil;
+
+    public WebSocketConfig(JwtUtil jwtUtil) {
+        this.jwtUtil = jwtUtil;
+    }
+
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         registry.addEndpoint("/ws-smashrank")
                 .setAllowedOriginPatterns("*")
-                .setHandshakeHandler(new UserHandshakeHandler()); // <-- Uses the class below
-        // .withSockJS(); // Optional: Enable if you need fallback for old browsers
+                .setHandshakeHandler(new UserHandshakeHandler(jwtUtil));
     }
 
     @Override
@@ -33,14 +39,44 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     }
 
     /**
-     * Custom Handshake Handler to assign identity based on query param.
-     * Example: ws://localhost:8080/ws-smashrank?username=mew2king
+     * Phase 3: Supports two connection modes:
+     *
+     *   1. JWT (new):  ws://.../ws-smashrank?token=eyJhbG...
+     *      Validates the token, extracts the username, sets it as Principal.
+     *
+     *   2. Legacy:     ws://.../ws-smashrank?username=mew2king
+     *      Reads the raw username param (same as before).
+     *
+     * In BOTH cases the Principal is set to the username string, so
+     * convertAndSendToUser() and all STOMP routing continues to work
+     * unchanged. Phase 5 will switch the Principal to userId.
      */
     private static class UserHandshakeHandler extends DefaultHandshakeHandler {
+
+        private final JwtUtil jwtUtil;
+
+        UserHandshakeHandler(JwtUtil jwtUtil) {
+            this.jwtUtil = jwtUtil;
+        }
+
         @Override
-        protected Principal determineUser(ServerHttpRequest request, WebSocketHandler wsHandler, Map<String, Object> attributes) {
+        protected Principal determineUser(ServerHttpRequest request,
+                                          WebSocketHandler wsHandler,
+                                          Map<String, Object> attributes) {
             if (request instanceof ServletServerHttpRequest servletRequest) {
-                String username = servletRequest.getServletRequest().getParameter("username");
+                var httpRequest = servletRequest.getServletRequest();
+
+                // --- Option 1: JWT token ---
+                String token = httpRequest.getParameter("token");
+                if (token != null && jwtUtil.isTokenValid(token)) {
+                    String username = jwtUtil.extractUsername(token);
+                    if (username != null) {
+                        return () -> username;
+                    }
+                }
+
+                // --- Option 2: Legacy username param ---
+                String username = httpRequest.getParameter("username");
                 if (username != null) {
                     return () -> username;
                 }

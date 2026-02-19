@@ -2,6 +2,7 @@ package com.smashrank.smashrank_api.controller;
 
 import com.smashrank.smashrank_api.model.Match;
 import com.smashrank.smashrank_api.repository.MatchRepository;
+import com.smashrank.smashrank_api.service.UserService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -19,9 +20,11 @@ public class MatchController {
 
     private final SimpMessagingTemplate messagingTemplate;
     private final MatchRepository matchRepository;
+    private final UserService userService;
 
     // MVP Lock Map: Prevents race conditions.
     // Key: Username, Value: InviteID
+    // (Still keyed by username — STOMP routing uses username as Principal)
     private final Map<String, String> playerLocks = new ConcurrentHashMap<>();
 
     // Pending first-reports awaiting confirmation from the other player.
@@ -32,9 +35,12 @@ public class MatchController {
     // Key: matchId (of the COMPLETED match), Value: PendingRematch
     private final Map<String, PendingRematch> pendingRematches = new ConcurrentHashMap<>();
 
-    public MatchController(SimpMessagingTemplate messagingTemplate, MatchRepository matchRepository) {
+    public MatchController(SimpMessagingTemplate messagingTemplate,
+                           MatchRepository matchRepository,
+                           UserService userService) {
         this.messagingTemplate = messagingTemplate;
         this.matchRepository = matchRepository;
+        this.userService = userService;
     }
 
     // =========================================================================
@@ -78,8 +84,14 @@ public class MatchController {
             throw new IllegalStateException("Invite expired or invalid");
         }
 
-        // Create the official match record
-        Match match = new Match(request.challengerUsername(), request.opponentUsername());
+        // Phase 3: Resolve UUIDs for both players
+        UUID challengerId = userService.getUserIdByUsername(request.challengerUsername());
+        UUID opponentId = userService.getUserIdByUsername(request.opponentUsername());
+
+        // Create the official match record (with both username and UUID fields)
+        Match match = new Match(
+                request.challengerUsername(), request.opponentUsername(),
+                challengerId, opponentId);
         matchRepository.save(match);
 
         // Notify both players
@@ -167,7 +179,7 @@ public class MatchController {
 
     // =========================================================================
     // STEP 4: Confirm Result (Second player responds)
-    //         Now transitions to REMATCH_OFFERED instead of ENDED/DISPUTED
+    //         Transitions to REMATCH_OFFERED
     // =========================================================================
     @PostMapping("/confirm")
     public ResponseEntity<String> confirmResult(@RequestBody ConfirmRequest request) {
@@ -190,9 +202,12 @@ public class MatchController {
         Match match = matchRepository.findById(matchId).orElseThrow();
         if (agreed) {
             match.setWinnerUsername(pending.claimedWinner());
+            // Phase 3: Also set the winner UUID
+            match.setWinnerId(userService.getUserIdByUsername(pending.claimedWinner()));
             match.setStatus("COMPLETED");
         } else {
             match.setWinnerUsername(null);
+            match.setWinnerId(null);
             match.setStatus("DISPUTED");
         }
         matchRepository.save(match);
@@ -201,9 +216,6 @@ public class MatchController {
         pendingReports.remove(matchId);
 
         // --- REMATCH FLOW ---
-        // Instead of releasing locks and sending ENDED/DISPUTED,
-        // create a pending rematch entry and send REMATCH_OFFERED.
-        // Locks stay held to prevent other invites during rematch window.
         String result = agreed ? "COMPLETED" : "DISPUTED";
         String winner = agreed ? pending.claimedWinner() : null;
 
@@ -211,7 +223,7 @@ public class MatchController {
                 matchId,
                 match.getPlayer1Username(),
                 match.getPlayer2Username(),
-                ConcurrentHashMap.newKeySet()  // thread-safe empty set
+                ConcurrentHashMap.newKeySet()
         ));
 
         MatchUpdateEvent rematchEvent = new MatchUpdateEvent(
@@ -284,11 +296,16 @@ public class MatchController {
         // Both players accepted — start a new match!
         pendingRematches.remove(matchId);
 
-        // Create new match (same two players, fresh record)
-        Match newMatch = new Match(pending.player1Username(), pending.player2Username());
+        // Phase 3: Resolve UUIDs for the rematch
+        UUID player1Id = userService.getUserIdByUsername(pending.player1Username());
+        UUID player2Id = userService.getUserIdByUsername(pending.player2Username());
+
+        Match newMatch = new Match(
+                pending.player1Username(), pending.player2Username(),
+                player1Id, player2Id);
         matchRepository.save(newMatch);
 
-        // Send STARTED to both — locks remain held (they're in a new match now)
+        // Send STARTED to both — locks remain held
         MatchUpdateEvent startedEvent = new MatchUpdateEvent(
                 newMatch.getId(), "STARTED",
                 newMatch.getPlayer1Username(), newMatch.getPlayer2Username(),
