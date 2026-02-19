@@ -48,9 +48,9 @@ public class DataSeeder implements CommandLineRunner {
         User user = new User(username, hashedPassword);
         userRepository.save(user);
 
-        // 2. Create Player (gaming profile)
-        // Note: Player still uses username for now; Phase 2 will add userId FK.
+        // 2. Create Player (gaming profile) linked via userId
         Player player = new Player(username, username);
+        player.setUserId(user.getId());
         player.updateElo(elo);
         playerRepository.save(player);
     }

@@ -67,10 +67,9 @@ public class AuthService {
         userRepository.save(user);
 
         // Create linked Player profile (gaming stats, starts at 1200 Elo)
+        // Phase 2: Player now gets the userId FK set.
         Player player = new Player(username, username);
-        // Note: Player still has a username column for now (Phase 2 adds userId FK).
-        // The Player.username will eventually be removed, but for now it keeps
-        // existing match/pool flows working.
+        player.setUserId(user.getId());
         playerRepository.save(player);
 
         // Generate tokens
