@@ -39,17 +39,12 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     }
 
     /**
-     * Phase 3: Supports two connection modes:
+     * Phase 5: JWT-only connection mode.
      *
-     *   1. JWT (new):  ws://.../ws-smashrank?token=eyJhbG...
-     *      Validates the token, extracts the username, sets it as Principal.
+     *   ws://.../ws-smashrank?token=eyJhbG...
      *
-     *   2. Legacy:     ws://.../ws-smashrank?username=mew2king
-     *      Reads the raw username param (same as before).
-     *
-     * In BOTH cases the Principal is set to the username string, so
-     * convertAndSendToUser() and all STOMP routing continues to work
-     * unchanged. Phase 5 will switch the Principal to userId.
+     * Validates the token, extracts the username, and sets it as the Principal.
+     * The legacy ?username= param is no longer accepted.
      */
     private static class UserHandshakeHandler extends DefaultHandshakeHandler {
 
@@ -66,7 +61,6 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
             if (request instanceof ServletServerHttpRequest servletRequest) {
                 var httpRequest = servletRequest.getServletRequest();
 
-                // --- Option 1: JWT token ---
                 String token = httpRequest.getParameter("token");
                 if (token != null && jwtUtil.isTokenValid(token)) {
                     String username = jwtUtil.extractUsername(token);
@@ -74,14 +68,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                         return () -> username;
                     }
                 }
-
-                // --- Option 2: Legacy username param ---
-                String username = httpRequest.getParameter("username");
-                if (username != null) {
-                    return () -> username;
-                }
             }
-            return null;
+            return null; // Reject connection — no valid JWT provided
         }
     }
 }

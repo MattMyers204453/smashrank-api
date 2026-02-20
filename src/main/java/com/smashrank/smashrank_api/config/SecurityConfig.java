@@ -29,25 +29,21 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
-                // CORS: use the bean defined below
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-
-                // CSRF: disabled (stateless JWT-based API)
                 .csrf(csrf -> csrf.disable())
-
-                // Stateless sessions — no server-side session
                 .sessionManagement(session ->
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
                 // ---------------------------------------------------------------
-                // PHASE 1: Permit ALL endpoints so existing flows keep working.
-                // In Phase 5 we'll lock these down to require authentication.
+                // Phase 5: Locked down. Only auth endpoints and the WebSocket
+                // handshake are public. Everything else requires a valid JWT.
                 // ---------------------------------------------------------------
                 .authorizeHttpRequests(auth -> auth
-                        .anyRequest().permitAll()
+                        .requestMatchers("/api/auth/**").permitAll()
+                        .requestMatchers("/ws-smashrank/**").permitAll()
+                        .anyRequest().authenticated()
                 )
 
-                // Insert our JWT filter before Spring's default username/password filter
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
