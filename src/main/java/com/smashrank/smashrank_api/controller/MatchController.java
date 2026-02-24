@@ -4,6 +4,8 @@ import com.smashrank.smashrank_api.model.Match;
 import com.smashrank.smashrank_api.repository.MatchRepository;
 import com.smashrank.smashrank_api.service.EloService;
 import com.smashrank.smashrank_api.service.UserService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -18,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequestMapping("/api/matches")
 @CrossOrigin(origins = "*")
 public class MatchController {
+    private static final Logger log = LoggerFactory.getLogger(MatchController.class);
 
     private final SimpMessagingTemplate messagingTemplate;
     private final MatchRepository matchRepository;
@@ -55,12 +58,15 @@ public class MatchController {
     public ResponseEntity<String> sendInvite(@RequestBody InviteRequest request) {
         String challenger = request.challengerUsername();
         String opponent = request.targetUsername();
+        log.info("Invite request from {} to {}", challenger, opponent);
 
         // 1. Race Condition Check
         if (playerLocks.containsKey(challenger)) {
+            log.warn("Invite failed: Challenger {} already has a pending invite.", challenger);
             return ResponseEntity.status(HttpStatus.CONFLICT).body("You already have a pending invite.");
         }
         if (playerLocks.containsKey(opponent)) {
+            log.warn("Invite failed: Opponent {} is busy.", opponent);
             return ResponseEntity.status(HttpStatus.CONFLICT).body("Player is busy (likely sending you an invite!)");
         }
 
@@ -68,6 +74,7 @@ public class MatchController {
         String inviteId = UUID.randomUUID().toString();
         playerLocks.put(challenger, inviteId);
         playerLocks.put(opponent, inviteId);
+        log.debug("Players {} and {} locked with inviteId {}", challenger, opponent, inviteId);
 
         // 3. Send WebSocket Message to Opponent
         InvitePayload payload = new InvitePayload(inviteId, challenger, "PENDING");
@@ -82,10 +89,12 @@ public class MatchController {
     @PostMapping("/accept")
     public void acceptInvite(@RequestBody AcceptRequest request) {
         String inviteId = request.inviteId();
+        log.info("Accepting invite {} for players {} and {}", inviteId, request.challengerUsername(), request.opponentUsername());
 
         // Security: Ensure the lock matches the invite
         String lockedId = playerLocks.get(request.challengerUsername());
         if (lockedId == null || !lockedId.equals(inviteId)) {
+            log.error("Accept failed: Invite {} expired or invalid for challenger {}", inviteId, request.challengerUsername());
             throw new IllegalStateException("Invite expired or invalid");
         }
 
@@ -98,6 +107,7 @@ public class MatchController {
                 request.challengerUsername(), request.opponentUsername(),
                 challengerId, opponentId);
         matchRepository.save(match);
+        log.info("Match created with ID: {}", match.getId());
 
         // Notify both players
         MatchUpdateEvent event = new MatchUpdateEvent(
@@ -115,6 +125,7 @@ public class MatchController {
     // =========================================================================
     @PostMapping("/decline")
     public void declineInvite(@RequestBody DeclineRequest request) {
+        log.info("Declining invite for players {} and {}", request.challengerUsername(), request.opponentUsername());
         // Release locks
         playerLocks.remove(request.challengerUsername());
         playerLocks.remove(request.opponentUsername());
@@ -137,16 +148,19 @@ public class MatchController {
         String inviteId = request.inviteId();
         String challenger = request.challengerUsername();
         String opponent = request.opponentUsername();
+        log.info("Cancelling invite {} from {}", inviteId, challenger);
 
         // Validate that the lock exists and matches
         String lockedId = playerLocks.get(challenger);
         if (lockedId == null || !lockedId.equals(inviteId)) {
+            log.warn("Cancel failed: No matching invite {} for challenger {}", inviteId, challenger);
             return ResponseEntity.status(HttpStatus.CONFLICT).body("No matching invite to cancel.");
         }
 
         // Release locks
         playerLocks.remove(challenger);
         playerLocks.remove(opponent);
+        log.debug("Locks released for {} and {}", challenger, opponent);
 
         // Notify opponent that invite was cancelled
         InvitePayload cancelPayload = new InvitePayload(inviteId, challenger, "CANCELLED");
@@ -161,9 +175,11 @@ public class MatchController {
     @PostMapping("/report")
     public ResponseEntity<String> reportResult(@RequestBody ReportRequest request) {
         String matchId = request.matchId();
+        log.info("Result reported for match {}: reporter={}, winner={}", matchId, request.reporterUsername(), request.claimedWinner());
 
         // Reject if someone already reported for this match
         if (pendingReports.containsKey(matchId)) {
+            log.warn("Report failed: Result already reported for match {}", matchId);
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .body("A result has already been reported for this match. Waiting for confirmation.");
         }
@@ -192,20 +208,23 @@ public class MatchController {
     @PostMapping("/confirm")
     public ResponseEntity<String> confirmResult(@RequestBody ConfirmRequest request) {
         String matchId = request.matchId();
+        log.info("Confirming result for match {}: confirmer={}, winner={}", matchId, request.confirmerUsername(), request.claimedWinner());
 
         PendingReport pending = pendingReports.get(matchId);
         if (pending == null) {
+            log.warn("Confirm failed: No pending report for match {}", matchId);
             return ResponseEntity.status(HttpStatus.CONFLICT).body("No pending report for this match.");
         }
 
         // Prevent the reporter from confirming their own report
         if (pending.reporterUsername().equals(request.confirmerUsername())) {
+            log.warn("Confirm failed: Reporter {} tried to confirm their own report for match {}", request.confirmerUsername(), matchId);
             return ResponseEntity.status(HttpStatus.CONFLICT).body("You already reported. Waiting for opponent.");
         }
 
         // Compare claims
-        // Compare claims
         boolean agreed = pending.claimedWinner().equals(request.claimedWinner());
+        log.info("Match {} agreement: {}", matchId, agreed);
 
         // Update the match in Postgres
         Match match = matchRepository.findById(matchId).orElseThrow();
@@ -219,12 +238,14 @@ public class MatchController {
 
             // ===== NEW: Process Elo update =====
             eloResult = eloService.processMatchResult(match);
+            log.info("Elo processed for match {}. P1 Delta: {}, P2 Delta: {}", matchId, eloResult.player1Delta(), eloResult.player2Delta());
             // Match entity now has elo audit fields populated.
             // Player entities updated via JPA dirty checking.
         } else {
             match.setWinnerUsername(null);
             match.setWinnerId(null);
             match.setStatus("DISPUTED");
+            log.warn("Match {} is DISPUTED", matchId);
         }
         matchRepository.save(match);
 
@@ -246,7 +267,12 @@ public class MatchController {
         }
 
         // Store rematch tracking...
-        // (existing rematch code stays the same)
+        pendingRematches.put(matchId, new PendingRematch(
+                matchId,
+                match.getPlayer1Username(),
+                match.getPlayer2Username(),
+                ConcurrentHashMap.newKeySet()
+        ));
 
         // ===== UPDATED: Send events with Elo data =====
         MatchUpdateEvent rematchEvent = new MatchUpdateEvent(
@@ -273,24 +299,29 @@ public class MatchController {
         String matchId = request.matchId();
         String username = request.username();
         boolean accept = request.accept();
+        log.info("Rematch response from {} for match {}: accept={}", username, matchId, accept);
 
         PendingRematch pending = pendingRematches.get(matchId);
         if (pending == null) {
+            log.warn("Rematch failed: No pending rematch for match {}", matchId);
             return ResponseEntity.status(HttpStatus.CONFLICT).body("No pending rematch for this match.");
         }
 
         // Validate the player is part of this match
         if (!pending.player1Username().equals(username) && !pending.player2Username().equals(username)) {
+            log.error("Rematch failed: User {} is not part of match {}", username, matchId);
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("You are not part of this match.");
         }
 
         // Reject duplicate responses
         if (pending.acceptedPlayers().contains(username)) {
+            log.warn("Rematch failed: User {} already responded for match {}", username, matchId);
             return ResponseEntity.status(HttpStatus.CONFLICT).body("You already responded to this rematch.");
         }
 
         // --- DECLINE ---
         if (!accept) {
+            log.info("Rematch declined by {} for match {}", username, matchId);
             pendingRematches.remove(matchId);
             playerLocks.remove(pending.player1Username());
             playerLocks.remove(pending.player2Username());
@@ -309,6 +340,7 @@ public class MatchController {
 
         // --- ACCEPT ---
         pending.acceptedPlayers().add(username);
+        log.debug("User {} accepted rematch for match {}", username, matchId);
 
         if (pending.acceptedPlayers().size() == 1) {
             // Only one player accepted so far — notify them they're waiting
@@ -324,6 +356,7 @@ public class MatchController {
         }
 
         // Both players accepted — start a new match!
+        log.info("Rematch accepted by both players for match {}. Creating new match.", matchId);
         pendingRematches.remove(matchId);
 
         // Phase 3: Resolve UUIDs for the rematch
