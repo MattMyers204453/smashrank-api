@@ -15,7 +15,7 @@ public class Player {
     private Long id;
 
     // =========================================================================
-    // NEW (Phase 2): Links this gaming profile to the auth identity.
+    // Links this gaming profile to the auth identity.
     // Nullable for now so existing rows don't break. Phase 5 will enforce this.
     // =========================================================================
     @Column(name = "user_id", unique = true)
@@ -69,10 +69,32 @@ public class Player {
     public void setUsername(String username) { this.username = username; }
     public void setLastTag(String lastTag) { this.lastTag = lastTag; }
 
+    // =========================================================================
+    // Elo helpers
+    // =========================================================================
+
+    /**
+     * Update Elo and track peak. Called by EloService after calculation.
+     */
     public void updateElo(int newElo) {
         this.elo = newElo;
         if (newElo > this.peakElo) {
             this.peakElo = newElo;
         }
+    }
+
+    /** Increment win counter. */
+    public void recordWin() {
+        this.wins++;
+    }
+
+    /** Increment loss counter. */
+    public void recordLoss() {
+        this.losses++;
+    }
+
+    /** Total completed games. Used for K-factor calculation. */
+    public int getTotalGames() {
+        return this.wins + this.losses;
     }
 }
