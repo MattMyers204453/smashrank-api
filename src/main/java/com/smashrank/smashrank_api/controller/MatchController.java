@@ -3,6 +3,7 @@ package com.smashrank.smashrank_api.controller;
 import com.smashrank.smashrank_api.model.Match;
 import com.smashrank.smashrank_api.repository.MatchRepository;
 import com.smashrank.smashrank_api.service.EloService;
+import com.smashrank.smashrank_api.service.PoolService;
 import com.smashrank.smashrank_api.service.UserService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,14 +42,18 @@ public class MatchController {
 
     private final EloService eloService;
 
-    public MatchController(SimpMessagingTemplate messagingTemplate,
-                           MatchRepository matchRepository,
+    private final PoolService poolService;  // To look up characters from Redis
+
+    public MatchController(MatchRepository matchRepository,
+                           SimpMessagingTemplate messagingTemplate,
                            UserService userService,
-                           EloService eloService) {
-        this.messagingTemplate = messagingTemplate;
+                           EloService eloService,
+                           PoolService poolService) {
         this.matchRepository = matchRepository;
+        this.messagingTemplate = messagingTemplate;
         this.userService = userService;
-        this.eloService = eloService;;
+        this.eloService = eloService;
+        this.poolService = poolService;
     }
 
     // =========================================================================
@@ -98,23 +103,30 @@ public class MatchController {
             throw new IllegalStateException("Invite expired or invalid");
         }
 
-        // Phase 3: Resolve UUIDs for both players
-        UUID challengerId = userService.getUserIdByUsername(request.challengerUsername());
-        UUID opponentId = userService.getUserIdByUsername(request.opponentUsername());
+        // Look up characters from the pool
+        String challengerChar = poolService.getCheckedInCharacter(request.challengerUsername());
+        String opponentChar = poolService.getCheckedInCharacter(request.opponentUsername());
 
         // Create the official match record (with both username and UUID fields)
+        // Create match WITH character data
         Match match = new Match(
-                request.challengerUsername(), request.opponentUsername(),
-                challengerId, opponentId);
+                request.challengerUsername(),
+                request.opponentUsername(),
+                userService.getUserIdByUsername(request.challengerUsername()),
+                userService.getUserIdByUsername(request.opponentUsername()),
+                challengerChar != null ? challengerChar : "Unknown",
+                opponentChar != null ? opponentChar : "Unknown"
+        );
         matchRepository.save(match);
         log.info("Match created with ID: {}", match.getId());
 
-        // Notify both players
         MatchUpdateEvent event = new MatchUpdateEvent(
                 match.getId(), "STARTED",
-                match.getPlayer1Username(), match.getPlayer2Username(),
+                request.challengerUsername(), request.opponentUsername(),
                 null, null, null,
-                null, null, null, null);
+                null, null, null, null,            // Elo fields (null for STARTED)
+                challengerChar, opponentChar       // Character fields
+        );
 
         messagingTemplate.convertAndSendToUser(request.challengerUsername(), "/queue/match-updates", event);
         messagingTemplate.convertAndSendToUser(request.opponentUsername(), "/queue/match-updates", event);
@@ -135,7 +147,9 @@ public class MatchController {
                 null, "DECLINED",
                 request.challengerUsername(), request.opponentUsername(),
                 null, null, null,
-                null, null, null, null);
+                null, null, null, null,           // Elo
+                null, null                        // Characters (no match)
+        );
 
         messagingTemplate.convertAndSendToUser(request.challengerUsername(), "/queue/match-updates", event);
     }
@@ -193,7 +207,9 @@ public class MatchController {
                 matchId, "AWAITING_CONFIRMATION",
                 match.getPlayer1Username(), match.getPlayer2Username(),
                 request.reporterUsername(), request.claimedWinner(), null,
-                null, null, null, null);
+                null, null, null, null,
+                match.getPlayer1Character(), match.getPlayer2Character()
+        );
 
         messagingTemplate.convertAndSendToUser(match.getPlayer1Username(), "/queue/match-updates", event);
         messagingTemplate.convertAndSendToUser(match.getPlayer2Username(), "/queue/match-updates", event);
@@ -224,39 +240,31 @@ public class MatchController {
 
         // Compare claims
         boolean agreed = pending.claimedWinner().equals(request.claimedWinner());
-        log.info("Match {} agreement: {}", matchId, agreed);
 
-        // Update the match in Postgres
         Match match = matchRepository.findById(matchId).orElseThrow();
 
-        EloService.EloResult eloResult = null;  // ← ADD THIS
+        EloService.EloResult eloResult = null;
 
         if (agreed) {
             match.setWinnerUsername(pending.claimedWinner());
             match.setWinnerId(userService.getUserIdByUsername(pending.claimedWinner()));
             match.setStatus("COMPLETED");
 
-            // ===== NEW: Process Elo update =====
+            // Process per-character Elo update
             eloResult = eloService.processMatchResult(match);
-            log.info("Elo processed for match {}. P1 Delta: {}, P2 Delta: {}", matchId, eloResult.player1Delta(), eloResult.player2Delta());
-            // Match entity now has elo audit fields populated.
-            // Player entities updated via JPA dirty checking.
         } else {
             match.setWinnerUsername(null);
             match.setWinnerId(null);
             match.setStatus("DISPUTED");
-            log.warn("Match {} is DISPUTED", matchId);
         }
         matchRepository.save(match);
 
-        // Clean up pending report
         pendingReports.remove(matchId);
 
-        // --- REMATCH FLOW ---
+        // REMATCH FLOW
         String result = agreed ? "COMPLETED" : "DISPUTED";
         String winner = agreed ? pending.claimedWinner() : null;
 
-        // ===== UPDATED: Include Elo data in the event =====
         Integer p1EloDelta = null, p2EloDelta = null;
         Integer p1NewElo = null, p2NewElo = null;
         if (eloResult != null) {
@@ -274,13 +282,12 @@ public class MatchController {
                 ConcurrentHashMap.newKeySet()
         ));
 
-        // ===== UPDATED: Send events with Elo data =====
         MatchUpdateEvent rematchEvent = new MatchUpdateEvent(
                 matchId, "REMATCH_OFFERED",
                 match.getPlayer1Username(), match.getPlayer2Username(),
                 null, winner, result,
-                p1EloDelta, p2EloDelta,    // ← NEW FIELDS
-                p1NewElo, p2NewElo          // ← NEW FIELDS
+                p1EloDelta, p2EloDelta, p1NewElo, p2NewElo,
+                match.getPlayer1Character(), match.getPlayer2Character()
         );
 
         messagingTemplate.convertAndSendToUser(
@@ -330,7 +337,9 @@ public class MatchController {
                     matchId, "REMATCH_DECLINED",
                     pending.player1Username(), pending.player2Username(),
                     null, null, null,
-                    null, null, null, null);
+                    null, null, null, null,
+                    null, null
+            );
 
             messagingTemplate.convertAndSendToUser(pending.player1Username(), "/queue/match-updates", declinedEvent);
             messagingTemplate.convertAndSendToUser(pending.player2Username(), "/queue/match-updates", declinedEvent);
@@ -344,11 +353,14 @@ public class MatchController {
 
         if (pending.acceptedPlayers().size() == 1) {
             // Only one player accepted so far — notify them they're waiting
+            Match match = matchRepository.findById(matchId).orElseThrow();
             MatchUpdateEvent waitingEvent = new MatchUpdateEvent(
                     matchId, "REMATCH_WAITING",
                     pending.player1Username(), pending.player2Username(),
                     null, null, null,
-                    null, null, null, null);
+                    null, null, null, null,
+                    match.getPlayer1Character(), match.getPlayer2Character()
+            );
 
             messagingTemplate.convertAndSendToUser(username, "/queue/match-updates", waitingEvent);
 
@@ -363,20 +375,29 @@ public class MatchController {
         UUID player1Id = userService.getUserIdByUsername(pending.player1Username());
         UUID player2Id = userService.getUserIdByUsername(pending.player2Username());
 
+        Match oldMatch = matchRepository.findById(matchId).orElseThrow();
         Match newMatch = new Match(
-                pending.player1Username(), pending.player2Username(),
-                player1Id, player2Id);
+                pending.player1Username(),
+                pending.player2Username(),
+                player1Id,
+                player2Id,
+                // Characters carry over (no switching in Quickplay rematches)
+                oldMatch.getPlayer1Character(),
+                oldMatch.getPlayer2Character()
+        );
         matchRepository.save(newMatch);
 
-        // Send STARTED to both — locks remain held
-        MatchUpdateEvent startedEvent = new MatchUpdateEvent(
+        // STARTED event for the rematch includes characters
+        MatchUpdateEvent startEvent = new MatchUpdateEvent(
                 newMatch.getId(), "STARTED",
-                newMatch.getPlayer1Username(), newMatch.getPlayer2Username(),
+                pending.player1Username(), pending.player2Username(),
                 null, null, null,
-                null, null, null, null);
+                null, null, null, null,
+                newMatch.getPlayer1Character(), newMatch.getPlayer2Character()
+        );
 
-        messagingTemplate.convertAndSendToUser(pending.player1Username(), "/queue/match-updates", startedEvent);
-        messagingTemplate.convertAndSendToUser(pending.player2Username(), "/queue/match-updates", startedEvent);
+        messagingTemplate.convertAndSendToUser(pending.player1Username(), "/queue/match-updates", startEvent);
+        messagingTemplate.convertAndSendToUser(pending.player2Username(), "/queue/match-updates", startEvent);
 
         return ResponseEntity.ok("Rematch started! New match ID: " + newMatch.getId());
     }
@@ -384,39 +405,47 @@ public class MatchController {
     // =========================================================================
     // DTOs
     // =========================================================================
-    public record InviteRequest(String challengerUsername, String targetUsername) {}
-    public record InvitePayload(String inviteId, String from, String status) {}
-    public record AcceptRequest(String inviteId, String challengerUsername, String opponentUsername) {}
-    public record DeclineRequest(String inviteId, String challengerUsername, String opponentUsername) {}
-    public record CancelRequest(String inviteId, String challengerUsername, String opponentUsername) {}
+    public record InviteRequest(String challengerUsername, String targetUsername) {
+    }
+
+    public record InvitePayload(String inviteId, String from, String status) {
+    }
+
+    public record AcceptRequest(String inviteId, String challengerUsername, String opponentUsername) {
+    }
+
+    public record DeclineRequest(String inviteId, String challengerUsername, String opponentUsername) {
+    }
+
+    public record CancelRequest(String inviteId, String challengerUsername, String opponentUsername) {
+    }
 
     // Report: first player submits their claim
-    public record ReportRequest(String matchId, String reporterUsername, String claimedWinner) {}
+    public record ReportRequest(String matchId, String reporterUsername, String claimedWinner) {
+    }
 
     // Confirm: second player submits their independent view
-    public record ConfirmRequest(String matchId, String confirmerUsername, String claimedWinner) {}
+    public record ConfirmRequest(String matchId, String confirmerUsername, String claimedWinner) {
+    }
 
     // Rematch: player accepts or declines rematch offer
-    public record RematchRequest(String matchId, String username, boolean accept) {}
+    public record RematchRequest(String matchId, String username, boolean accept) {
+    }
 
     // Internal: held in pendingReports map
-    public record PendingReport(String reporterUsername, String claimedWinner) {}
+    public record PendingReport(String reporterUsername, String claimedWinner) {
+    }
 
     // Internal: held in pendingRematches map
     public record PendingRematch(String matchId, String player1Username, String player2Username,
-                                 Set<String> acceptedPlayers) {}
+                                 Set<String> acceptedPlayers) {
+    }
 
     /**
      * WebSocket event — sent on /user/queue/match-updates
      *
-     * Fields populated per status:
-     * - AWAITING_CONFIRMATION: reporterUsername, claimedWinner
-     * - REMATCH_OFFERED: result, claimedWinner (winner), Elo fields
-     * - STARTED: player1, player2
-     *
-     * Elo fields (only on REMATCH_OFFERED with result=COMPLETED):
-     * - player1EloDelta, player2EloDelta: rating change (+/-)
-     * - player1NewElo, player2NewElo: updated ratings
+     * All states include player1Character/player2Character.
+     * Elo fields only populated on REMATCH_OFFERED with result=COMPLETED.
      */
     public record MatchUpdateEvent(
             String matchId,
@@ -430,6 +459,9 @@ public class MatchController {
             Integer player1EloDelta,
             Integer player2EloDelta,
             Integer player1NewElo,
-            Integer player2NewElo
+            Integer player2NewElo,
+            // Character fields
+            String player1Character,
+            String player2Character
     ) {}
 }

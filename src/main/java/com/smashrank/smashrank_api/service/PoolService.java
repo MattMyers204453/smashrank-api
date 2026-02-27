@@ -93,6 +93,39 @@ public class PoolService {
 //        }
 //    }
 
+    /**
+     * Get the character a player checked in with.
+     * Returns null if not checked in.
+     */
+    public String getCheckedInCharacter(String username) {
+        PoolPlayer player = getCheckedInPlayer(username);
+        return player != null ? player.character() : null;
+    }
+
+    /**
+     * Get full pool info for a player. Returns null if not checked in.
+     */
+    public PoolPlayer getCheckedInPlayer(String username) {
+        String lowerUsername = username.toLowerCase();
+
+        // Range matches entries starting with exactly "username:"
+        // Using ";" (ASCII 59, one after ":" which is 58) as exclusive upper bound
+        var range = Range.from(Range.Bound.inclusive(lowerUsername + ":"))
+                .to(Range.Bound.exclusive(lowerUsername + ";"));
+
+        Set<String> results = redisTemplate.opsForZSet().rangeByLex(
+                KEY_SEARCH,
+                range,
+                Limit.limit().count(1)
+        );
+
+        if (results == null || results.isEmpty()) {
+            return null;
+        }
+
+        return parseValue(results.iterator().next());
+    }
+
     // Helper: Prepends lowercase username for sorting
     private String formatValue(String username, String character, int elo) {
         // Format: "lowercase:Original:Character:ELO"

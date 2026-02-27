@@ -18,24 +18,19 @@ public class Match {
     private String id;
 
     // =========================================================================
-    // Username columns (existing — still used by STOMP messaging, Flutter, etc.)
-    // These will be removed in Phase 5 after the full migration.
+    // Player identification (username + UUID)
     // =========================================================================
     @Getter
     @Column(nullable = false)
-    private String player1Username; // Challenger
+    private String player1Username;
 
     @Getter
     @Column(nullable = false)
-    private String player2Username; // Opponent
+    private String player2Username;
 
     @Getter @Setter
     private String winnerUsername;
 
-    // =========================================================================
-    // UUID columns (Phase 3 — the future primary identifiers)
-    // Nullable for now so existing rows aren't broken by the migration.
-    // =========================================================================
     @Getter @Setter
     @Column(name = "player1_id")
     private UUID player1Id;
@@ -48,7 +43,20 @@ public class Match {
     @Column(name = "winner_id")
     private UUID winnerId;
 
-    // ACTIVE → COMPLETED or DISPUTED
+    // =========================================================================
+    // Character played (set at match creation from pool check-in data)
+    // =========================================================================
+    @Getter @Setter
+    @Column(name = "player1_character", length = 50)
+    private String player1Character;
+
+    @Getter @Setter
+    @Column(name = "player2_character", length = 50)
+    private String player2Character;
+
+    // =========================================================================
+    // Match status
+    // =========================================================================
     @Getter @Setter
     @Column(nullable = false)
     private String status = "ACTIVE";
@@ -58,9 +66,8 @@ public class Match {
     private LocalDateTime playedAt;
 
     // =========================================================================
-    // Elo audit fields — populated when match status becomes COMPLETED.
-    // Provides full audit trail: before/after ratings + K-factor for both players.
-    // These remain null for ACTIVE and DISPUTED matches.
+    // Elo audit trail (populated on COMPLETED, null for ACTIVE/DISPUTED)
+    // These are character-specific Elo values.
     // =========================================================================
     @Getter @Setter
     @Column(name = "player1_elo_before")
@@ -94,9 +101,6 @@ public class Match {
         this.player2Username = player2Username;
     }
 
-    /**
-     * Phase 3: Set both username and UUID fields at creation time.
-     */
     public Match(String player1Username, String player2Username,
                  UUID player1Id, UUID player2Id) {
         this.player1Username = player1Username;
@@ -105,17 +109,26 @@ public class Match {
         this.player2Id = player2Id;
     }
 
-    // =========================================================================
-    // Elo convenience getters
-    // =========================================================================
+    /**
+     * Full constructor with characters (used for new match creation).
+     */
+    public Match(String player1Username, String player2Username,
+                 UUID player1Id, UUID player2Id,
+                 String player1Character, String player2Character) {
+        this.player1Username = player1Username;
+        this.player2Username = player2Username;
+        this.player1Id = player1Id;
+        this.player2Id = player2Id;
+        this.player1Character = player1Character;
+        this.player2Character = player2Character;
+    }
 
-    /** Get the Elo delta for player 1 (positive = gained, negative = lost). */
+    // Elo delta helpers
     public Integer getPlayer1EloDelta() {
         if (player1EloBefore == null || player1EloAfter == null) return null;
         return player1EloAfter - player1EloBefore;
     }
 
-    /** Get the Elo delta for player 2. */
     public Integer getPlayer2EloDelta() {
         if (player2EloBefore == null || player2EloAfter == null) return null;
         return player2EloAfter - player2EloBefore;

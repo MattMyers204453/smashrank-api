@@ -6,6 +6,13 @@ import org.hibernate.annotations.UpdateTimestamp;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
+/**
+ * Player gaming profile. The `elo` field is denormalized — it always equals
+ * the player's highest character Elo, updated by EloService after each match.
+ * This enables fast global leaderboard queries without joining character stats.
+ *
+ * The `wins` and `losses` fields are aggregate totals across all characters.
+ */
 @Entity
 @Table(name = "players")
 public class Player {
@@ -14,27 +21,25 @@ public class Player {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // =========================================================================
-    // Links this gaming profile to the auth identity.
-    // Nullable for now so existing rows don't break. Phase 5 will enforce this.
-    // =========================================================================
     @Column(name = "user_id", unique = true)
     private UUID userId;
 
-    // Still here for now — existing match flow, pool, and WebSockets use it.
-    // Will be removed in Phase 5 after everything migrates to userId.
     @Column(nullable = false, unique = true)
     private String username;
 
-    // The cosmetic name (e.g., "CT | M2K")
     private String lastTag;
 
+    /** Denormalized: MAX Elo across all characters. Updated by EloService. */
     @Column(nullable = false)
     private int elo = 1200;
 
+    /** Denormalized: highest Elo this player has ever achieved on any character. */
     private int peakElo = 1200;
 
+    /** Aggregate wins across all characters. */
     private int wins = 0;
+
+    /** Aggregate losses across all characters. */
     private int losses = 0;
 
     @CreationTimestamp
@@ -44,9 +49,7 @@ public class Player {
     @UpdateTimestamp
     private LocalDateTime updatedAt;
 
-    // Constructors
     public Player() {}
-
     public Player(String username, String lastTag) {
         this.username = username;
         this.lastTag = lastTag;
@@ -61,6 +64,7 @@ public class Player {
     public int getPeakElo() { return peakElo; }
     public int getWins() { return wins; }
     public int getLosses() { return losses; }
+    public int getTotalGames() { return wins + losses; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }
 
@@ -69,13 +73,6 @@ public class Player {
     public void setUsername(String username) { this.username = username; }
     public void setLastTag(String lastTag) { this.lastTag = lastTag; }
 
-    // =========================================================================
-    // Elo helpers
-    // =========================================================================
-
-    /**
-     * Update Elo and track peak. Called by EloService after calculation.
-     */
     public void updateElo(int newElo) {
         this.elo = newElo;
         if (newElo > this.peakElo) {
@@ -83,18 +80,6 @@ public class Player {
         }
     }
 
-    /** Increment win counter. */
-    public void recordWin() {
-        this.wins++;
-    }
-
-    /** Increment loss counter. */
-    public void recordLoss() {
-        this.losses++;
-    }
-
-    /** Total completed games. Used for K-factor calculation. */
-    public int getTotalGames() {
-        return this.wins + this.losses;
-    }
+    public void recordWin() { this.wins++; }
+    public void recordLoss() { this.losses++; }
 }
