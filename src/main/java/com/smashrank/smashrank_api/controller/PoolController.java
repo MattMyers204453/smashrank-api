@@ -52,8 +52,8 @@ public class PoolController {
     }
 
     @PostMapping("/check-out")
-    public void checkOut(@RequestParam String username, @RequestParam String character, @RequestParam int elo) {
-        poolService.checkOut(username, character, elo);
+    public void checkOut(@RequestParam String username) {
+        poolService.checkOut(username);
     }
 
     @GetMapping("/search")

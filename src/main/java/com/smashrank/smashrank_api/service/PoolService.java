@@ -37,10 +37,14 @@ public class PoolService {
         redisTemplate.opsForZSet().add(KEY_EXPIRY, value, System.currentTimeMillis());
     }
 
-    public void checkOut(String username, String character, int elo) {
-        // formatValue will now generate "mew2king:Mew2King:..." matching the new format
-        String value = formatValue(username, character, elo);
+    public void checkOut(String username) {
+        // Look up what is actually stored in Redis so the removal key matches exactly.
+        PoolPlayer stored = getCheckedInPlayer(username);
+        if (stored == null) {
+            return; // Already not in the pool.
+        }
 
+        String value = formatValue(stored.username(), stored.character(), stored.elo());
         redisTemplate.opsForZSet().remove(KEY_SEARCH, value);
         redisTemplate.opsForZSet().remove(KEY_EXPIRY, value);
     }
