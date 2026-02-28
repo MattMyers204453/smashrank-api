@@ -7,6 +7,7 @@ import com.smashrank.smashrank_api.service.PoolService;
 import com.smashrank.smashrank_api.service.UserService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -26,6 +27,13 @@ public class MatchController {
     private final SimpMessagingTemplate messagingTemplate;
     private final MatchRepository matchRepository;
     private final UserService userService;
+
+    // Injected timeout durations (overridden to 1s in application-test.properties)
+    @Value("${smashrank.match.confirm-timeout-seconds:20}")
+    private int confirmTimeoutSeconds;
+
+    @Value("${smashrank.match.rematch-timeout-seconds:20}")
+    private int rematchTimeoutSeconds;
 
     // MVP Lock Map: Prevents race conditions.
     // Key: Username, Value: InviteID
